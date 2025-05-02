@@ -1,12 +1,13 @@
 // EV Charging Complaint Management System - Consumer Page JavaScript
-// Add this to the top of each JS file
 (function() {
     // Force reload if cached
-    if (localStorage.getItem('appVersion') !== '1.0.1') {
-        localStorage.setItem('appVersion', '1.0.1');
+    const appVersion = '1.0.1';
+    if (localStorage.getItem('appVersion') !== appVersion) {
+        localStorage.setItem('appVersion', appVersion);
         window.location.reload(true);
     }
 })();
+
 // Global variables
 let qrScannerInstance = null;
 
@@ -32,9 +33,6 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Function to extract just the CPID part from a full charger ID
-// This removes the IN*ADN* prefix if present
-
-// Function to extract just the CPID part from a full charger ID
 function extractCPID(fullChargerId) {
     if (!fullChargerId) return '';
     
@@ -54,7 +52,6 @@ function extractCPID(fullChargerId) {
     // Otherwise, assume it's already just the CPID
     return upperCaseId;
 }
-
 
 // Setup Tab Switching
 function setupTabs() {
@@ -165,7 +162,7 @@ function isValidChargerID(id) {
            fullIdPattern2.test(upperCaseId) || 
            cpidPattern.test(upperCaseId);
 }
-// Scan QR Code - extracts CPID when scanning QR
+
 // Scan QR Code - properly handling all formats
 function scanQRCode() {
     const videoElem = document.getElementById('qrVideo');
@@ -225,6 +222,7 @@ function scanQRCode() {
         qrScannerInstance = requestAnimationFrame(scanQRCode);
     }
 }
+
 // Stop QR Scanner
 function stopQRScanner() {
     if (qrScannerInstance) {
@@ -240,21 +238,39 @@ function stopQRScanner() {
     }
 }
 
-// Find matching charger in our database (case insensitive)
+// Find matching charger in database
 function findCharger(cpid) {
-    if (!cpid) return null;
-    
-    // Get chargers from storage
-    const chargers = JSON.parse(localStorage.getItem('chargers') || '[]');
-    
-    // Extract just the CPID part in case the full ID was passed
-    const pureCpid = extractCPID(cpid);
-    
-    // Convert to uppercase for case-insensitive comparison
-    const upperCaseCPID = pureCpid.toUpperCase();
-    
-    // Find charger with case-insensitive matching on just the CPID part
-    return chargers.find(c => extractCPID(c.id).toUpperCase() === upperCaseCPID);
+    return new Promise((resolve, reject) => {
+        if (!cpid) {
+            resolve(null);
+            return;
+        }
+        
+        // Extract just the CPID part in case the full ID was passed
+        const pureCpid = extractCPID(cpid);
+        
+        // Create form data for API request
+        const formData = new FormData();
+        formData.append('cpid', pureCpid);
+        
+        // Fetch charger from API
+        fetch('api/consumer.php?action=findCharger', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.charger) {
+                resolve(data.charger);
+            } else {
+                resolve(null);
+            }
+        })
+        .catch(error => {
+            console.error('Error finding charger:', error);
+            reject(error);
+        });
+    });
 }
 
 // Setup Complaint Form
@@ -330,23 +346,53 @@ function setupComplaintForm() {
             }
             
             // Get form data
-            const formData = {
-                stationId: document.getElementById('stationId').value.trim(),
-                consumerName: document.getElementById('consumerName').value.trim(),
-                consumerPhone: document.getElementById('consumerPhone').value.trim(),
-                consumerEmail: document.getElementById('consumerEmail').value.trim() || 'Not provided',
-                complaintType: complaintTypeSelect.options[complaintTypeSelect.selectedIndex].text,
-                subIssueType: '',
-                complaintDescription: document.getElementById('complaintDescription').value.trim()
-            };
+            const formData = new FormData(complaintForm);
             
-            // Get sub-issue type if available
+            // Add sub-issue type if available
             if (subIssueSelect && !subIssueContainer.classList.contains('hidden')) {
-                formData.subIssueType = subIssueSelect.options[subIssueSelect.selectedIndex].text;
+                formData.append('subIssueType', subIssueSelect.options[subIssueSelect.selectedIndex].text);
             }
             
-            // Submit complaint
-            submitComplaint(formData);
+            // Get division from hidden field
+            const divisionHidden = document.getElementById('chargerDivisionHidden');
+            if (divisionHidden) {
+                formData.append('division', divisionHidden.value);
+            }
+            
+            // Show loading toast
+            showToast('info', 'Please Wait', 'Submitting your complaint...');
+            
+            // Submit complaint to API
+            fetch('api/consumer.php?action=submitComplaint', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Show tracking ID in confirmation modal
+                    document.getElementById('generatedTrackingId').textContent = data.tracking_id;
+                    document.getElementById('complaintConfirmationModal').classList.add('active');
+                    
+                    // Reset form
+                    complaintForm.reset();
+                    
+                    // Hide charger info display
+                    document.getElementById('chargerInfoDisplay').classList.add('hidden');
+                    
+                    // Remove hidden division field if exists
+                    if (divisionHidden) divisionHidden.remove();
+                    
+                    // Hide sub-issue container
+                    if (subIssueContainer) subIssueContainer.classList.add('hidden');
+                } else {
+                    showToast('error', 'Submission Failed', data.message || 'Failed to submit complaint');
+                }
+            })
+            .catch(error => {
+                console.error('Submission error:', error);
+                showToast('error', 'Submission Failed', 'A server error occurred. Please try again later.');
+            });
         });
     }
 }
@@ -409,97 +455,7 @@ function validateComplaintForm() {
     
     return true;
 }
-// Submit Complaint - ensuring only CPID is used
-function submitComplaint(formData) {
-    // Extract CPID from the station ID and convert to uppercase
-    const cpid = extractCPID(formData.stationId);
-    
-    // Get division from hidden field or charger
-    const divisionHidden = document.getElementById('chargerDivisionHidden');
-    let chargerDivision = divisionHidden ? divisionHidden.value : '';
-    
-    if (!chargerDivision) {
-        // Try to get division from charger using case-insensitive lookup
-        const charger = findCharger(cpid);
-        chargerDivision = charger ? charger.division : '';
-    }
-    
-    // Retrieve charger info if found
-    const charger = findCharger(cpid);
-    let chargerLocation = '';
-    
-    if (charger) {
-        chargerLocation = charger.location;
-        // If not already set, get division from charger
-        if (!chargerDivision) {
-            chargerDivision = charger.division;
-        }
-    }
-    
-    // Generate tracking ID
-    const today = new Date();
-    const year = today.getFullYear();
-    const month = String(today.getMonth() + 1).padStart(2, '0');
-    const day = String(today.getDate()).padStart(2, '0');
-    const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-    const trackingId = `CP-${year}${month}${day}-${random}`;
-    
-    // Prepare complaint object - using CPID instead of full charger ID
-    const complaint = {
-        trackingId,
-        chargerID: cpid, // Store only the CPID in uppercase
-        location: chargerLocation,
-        division: chargerDivision,
-        type: formData.complaintType,
-        subType: formData.subIssueType,
-        status: 'Open', // Always start as Open
-        consumerName: formData.consumerName,
-        consumerPhone: formData.consumerPhone,
-        consumerEmail: formData.consumerEmail,
-        description: formData.complaintDescription,
-        createdDate: new Date().toISOString(),
-        lastUpdated: new Date().toISOString(),
-        timeline: [
-            {
-                status: 'Complaint Received',
-                timestamp: new Date().toISOString(),
-                description: 'Complaint has been registered in the system.'
-            }
-        ]
-    };
-    
-    // Add auto-assignment note to timeline if division exists
-    if (chargerDivision) {
-        complaint.timeline.push({
-            status: 'Assigned to Division',
-            timestamp: new Date().toISOString(),
-            description: `Complaint automatically assigned to ${chargerDivision}`
-        });
-    }
-    
-    // Store complaints
-    const complaints = JSON.parse(localStorage.getItem('complaints') || '[]');
-    complaints.push(complaint);
-    localStorage.setItem('complaints', JSON.stringify(complaints));
-    
-    // Show confirmation
-    document.getElementById('generatedTrackingId').textContent = trackingId;
-    document.getElementById('complaintConfirmationModal').classList.add('active');
-    
-    // Reset form
-    document.getElementById('consumerComplaintForm').reset();
-    
-    // Hide charger info display
-    document.getElementById('chargerInfoDisplay').classList.add('hidden');
-    
-    // Remove hidden division field if exists
-    const hiddenField = document.getElementById('chargerDivisionHidden');
-    if (hiddenField) hiddenField.remove();
-    
-    // Hide sub-issue container
-    const subIssueContainer = document.getElementById('subIssueContainer');
-    if (subIssueContainer) subIssueContainer.classList.add('hidden');
-}
+
 // Load Sub-Issues for Complaint Types
 function loadSubIssues(issueType) {
     const subIssueSelect = document.getElementById('subIssueType');
@@ -609,7 +565,6 @@ function debounce(func, delay) {
     };
 }
 
-
 // Fetch Charger Details
 function fetchChargerDetails(stationId) {
     const chargerInfoDisplay = document.getElementById('chargerInfoDisplay');
@@ -617,41 +572,54 @@ function fetchChargerDetails(stationId) {
     
     if (!chargerInfoDisplay || !chargerLocationInfo) return;
     
+    // Show loading message
+    chargerLocationInfo.textContent = 'Loading...';
+    chargerInfoDisplay.classList.remove('hidden');
+    
     // Extract CPID and find charger with case-insensitive matching
     const cpid = extractCPID(stationId);
-    const charger = findCharger(cpid);
     
-    if (charger) {
-        // Update charger location info
-        chargerLocationInfo.textContent = charger.location || 'Unknown Location';
-        
-        // Store division for auto-assignment
-        if (charger.division) {
-            let hiddenDivisionInput = document.getElementById('chargerDivisionHidden');
-            
-            if (!hiddenDivisionInput) {
-                hiddenDivisionInput = document.createElement('input');
-                hiddenDivisionInput.type = 'hidden';
-                hiddenDivisionInput.id = 'chargerDivisionHidden';
-                document.getElementById('consumerComplaintForm').appendChild(hiddenDivisionInput);
+    // Fetch charger from API
+    findCharger(cpid)
+        .then(charger => {
+            if (charger) {
+                // Update charger location info
+                chargerLocationInfo.textContent = charger.location || 'Unknown Location';
+                
+                // Store division for auto-assignment
+                if (charger.division) {
+                    let hiddenDivisionInput = document.getElementById('chargerDivisionHidden');
+                    
+                    if (!hiddenDivisionInput) {
+                        hiddenDivisionInput = document.createElement('input');
+                        hiddenDivisionInput.type = 'hidden';
+                        hiddenDivisionInput.id = 'chargerDivisionHidden';
+                        document.getElementById('consumerComplaintForm').appendChild(hiddenDivisionInput);
+                    }
+                    
+                    hiddenDivisionInput.value = charger.division;
+                }
+                
+                // Show charger info display
+                chargerInfoDisplay.classList.remove('hidden');
+            } else {
+                // If not found, create minimal information
+                chargerLocationInfo.textContent = 'Unregistered Charger';
+                
+                // Show charger info display
+                chargerInfoDisplay.classList.remove('hidden');
+                
+                // Let user know this is an unregistered charger
+                showToast('info', 'Unregistered Charger', 'This charger ID is not in our system. Your complaint will be forwarded to the administrator.');
             }
-            
-            hiddenDivisionInput.value = charger.division;
-        }
-        
-        // Show charger info display
-        chargerInfoDisplay.classList.remove('hidden');
-    } else {
-        // If not found, create minimal information
-        chargerLocationInfo.textContent = 'Unregistered Charger';
-        
-        // Show charger info display
-        chargerInfoDisplay.classList.remove('hidden');
-        
-        // Let user know this is an unregistered charger
-        showToast('info', 'Unregistered Charger', 'This charger ID is not in our system. Your complaint will be forwarded to the administrator.');
-    }
+        })
+        .catch(error => {
+            console.error('Error fetching charger details:', error);
+            chargerLocationInfo.textContent = 'Error: Could not retrieve charger details';
+            chargerInfoDisplay.classList.remove('hidden');
+        });
 }
+
 // Setup Confirmation Modal
 function setupConfirmationModal() {
     // Close button handlers
